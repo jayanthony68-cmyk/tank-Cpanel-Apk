@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tank Cpanel</title>
+<script src="ble.js"></script>
+<style>
+:root{--bg:#2b2b2e;--fg:#f2f2f2;--ink:#111;--hi:#ff6b6b;--g:#5dff7a;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;min-height:100vh;font-family:Segoe UI,Arial,sans-serif;color:var(--fg);background:#1a1a1c;display:flex;justify-content:center}
+#scene{flex:1;display:flex;align-items:flex-end;justify-content:center;padding:20px}
+#tank{width:150px;height:260px;border:4px solid #ddd;border-top:none;border-radius:0 0 12px 12px;background:rgba(255,255,255,.2);position:relative;overflow:hidden}
+#water{position:absolute;left:0;right:0;bottom:0;background:#2e86de;height:30%;transition:height .1s}
+#sp{position:absolute;left:0;right:0;border-top:2px dashed #ff6b6b}
+#panel{width:360px;max-width:100%;background:var(--bg);border:1px solid #555;padding:10px 16px 16px;position:relative;overflow-y:auto;max-height:100vh}
+#panel.hidden{display:none}
+#show{display:none;position:fixed;top:0;right:12px;background:#111;color:#fff;border:1px solid #666;border-radius:0 0 8px 8px;padding:6px 12px;cursor:pointer}
+h1{font-size:17px;margin:2px 0 10px;display:flex;justify-content:space-between;align-items:center}
+#hide{background:#111;color:#fff;border:1px solid #666;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:13px}
+.row{display:flex;gap:12px;margin-bottom:12px}
+button.big{flex:1;background:var(--ink);color:#fff;border:1px solid #666;border-radius:6px;padding:12px 4px;font-weight:700;font-size:13px;cursor:pointer}
+button.big:active{background:#333}
+fieldset{border:1px solid #777;border-radius:4px;margin:0 0 14px;padding:4px 14px 8px}
+legend{font-size:12px;padding:0 4px}
+fieldset label{display:block;margin:6px 0;font-size:14px}
+.lbl{display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin:10px 0 4px}
+.lbl span{color:var(--hi)}
+.sl{display:flex;align-items:center;background:#1a1a1a;border:1px solid #555;height:24px;margin-bottom:6px}
+.sl.dis{opacity:.45}
+.sl b{width:20px;text-align:center;font-size:9px;background:#333;cursor:pointer;line-height:22px;user-select:none}
+.sl input{flex:1;min-width:0;margin:0;height:18px;accent-color:#9a9a9a;background:transparent}
+select,.g input{background:#111;color:#fff;border:1px solid #555;padding:6px;font-size:14px;width:100%}
+.g{display:flex;gap:10px;margin:6px 0 12px}
+.g input{text-align:center;padding:8px 2px}
+pre{background:#111;color:var(--g);font:12px/1.35 Consolas,monospace;padding:10px;margin:6px 0 0;min-height:230px;overflow:auto}
+#bt{width:100%;margin-bottom:10px}
+#bt.on{background:#1b5e20}
+.sm{font-size:11px;color:#bbb;margin-top:6px}
+@media(max-width:700px){body{flex-direction:column}#scene{display:none}#panel{width:100%;max-height:none}}
+</style>
+</head>
+<body>
+<div id="panel">
+<h1>Tank Cpanel</h1>
+<button class="big" id="bt">CONNECT ESP32 (BLUETOOTH)</button>
+<fieldset><legend>Control mode</legend>
+<label><input type="radio" name="m" value="A" checked> Automatic - PID (PLC)</label>
+<label><input type="radio" name="m" value="M"> Manual - operator sets speed</label></fieldset>
+<div class="lbl">Level setpoint: <span id="spv"></span></div>
+<div class="sl"><b data-d="-1">◀</b><input type="range" id="spr" min="0" max="40" step="10" value="20"><b data-d="1">▶</b></div>
+<div class="lbl">Manual pump speed: <span id="pv"></span></div>
+<div class="sl dis" id="pw"><b data-d="-1">◀</b><input type="range" id="pr" min="0" max="100" step="1" value="0" disabled><b data-d="1">▶</b></div>
+<div class="lbl" style="font-weight:600">PID gains: Kp | Ki [1/s] | Kd [s]</div>
+<div class="g"><input id="kp" value="8"><input id="ki" value="0.25"><input id="kd" value="0"></div>
+<div class="lbl">Live system readout:</div>
+<pre id="out"></pre>
+<div class="sm" id="st">ESP32: not connected (local simulation running)</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const S={pv:0,sp:20,pump:0,mode:'A',kp:8,ki:.25,kd:0,I:0,pe:0,out:0,vol:2.02,ble:false};
+const HMAX=40,ZN=['EMPTY','LOW','MEDIUM','HIGH','FULL'];
+let rx=null,link=null,buf='';
+function send(t){if(rx){rx.writeValue(new TextEncoder().encode(t+'\n')).catch(()=>{});}}
+function ui(){
+ $('spv').textContent=S.sp+' mm ('+ZN[Math.round(S.sp/10)]+')';$('pv').textContent=S.pump+' %';
+ $('pr').disabled=S.mode==='A';$('pw').classList.toggle('dis',S.mode==='A');
+}
+function readout(){
+ const e=S.sp-S.pv,f=n=>n.toFixed(1);
+ $('out').textContent=
+`LEVEL LOOP  LIC-101
+PV (sensor) :  ${f(S.pv)} mm
+SP          :  ${f(S.sp)} mm
+Error       : ${e>=0?'+':''}${f(e)} mm
+Zone        :  ${ZN[Math.round(S.pv/10)]}
+
+PUMP  P-101
+Mode        : ${S.mode==='A'?'AUTO (PID)':'MANUAL'}
+Speed       : ${S.out.toFixed(0)} %
+Gains       : ${S.kp}/${S.ki}/${S.kd}
+
+Source      : ${S.ble?'ESP32 (BLE)':'LOCAL SIM'}`;
+}
+function step(){
+ if(S.ble){return}
+ const dt=0.1;
+ const e=(S.sp-S.pv)/HMAX*100;
+ if(S.mode==='A'){
+  S.I=Math.max(-100,Math.min(100,S.I+S.ki*e*dt));
+  let u=S.kp*e+S.I+S.kd*(e-S.pe)/dt;S.pe=e;
+  S.out=Math.max(0,Math.min(100,u));
+ }else S.out=S.pump;
+ const qin=S.out/100*3,qout=1.2*Math.sqrt(S.pv/HMAX);
+ S.pv=Math.max(0,Math.min(HMAX,S.pv+(qin-qout)*dt));
+}
+setInterval(()=>{step();ui();readout()},100);
+// controls
+function bind(rid,key,cmd,num=true){
+ const r=$(rid);r.addEventListener('input',()=>{S[key]=+r.value;send(cmd+':'+r.value);ui()});
+ r.parentElement.querySelectorAll('b').forEach(b=>b.onclick=()=>{if(r.disabled)return;r.value=+r.value+(+b.dataset.d)*(+r.step);r.dispatchEvent(new Event('input'))});
+}
+bind('spr','sp','SP');bind('pr','pump','PUMP');
+document.querySelectorAll('input[name=m]').forEach(r=>r.onchange=()=>{S.mode=r.value;S.I=0;send('MODE:'+r.value);ui()});
+['kp','ki','kd'].forEach(k=>$(k).onchange=()=>{S[k]=parseFloat($(k).value)||0;send(`PID:${S.kp},${S.ki},${S.kd}`)});
+// Bluetooth (Nordic UART Service): native plugin in the Android app, Web Bluetooth in a browser
+const NUS='6e400001-b5a3-f393-8e8c-b6f9a3a3e1c1',TXC='6e400003-b5a3-f393-8e8c-b6f9a3a3e1c1',RXC='6e400002-b5a3-f393-8e8c-b6f9a3a3e1c1';
+const NATIVE=!!(window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform()&&window.BleClient);
+function setBle(on,msg){S.ble=on;$('bt').classList.toggle('on',on);$('bt').textContent=on?'ESP32 CONNECTED - TAP TO DISCONNECT':'CONNECT ESP32 (BLUETOOTH)';$('st').textContent=msg}
+function onData(t){buf+=t;let i;
+ while((i=buf.indexOf('\n'))>=0){const l=buf.slice(0,i).trim();buf=buf.slice(i+1);
+  const m=l.match(/PV:([\d.]+),OUT:([\d.]+)/);if(m){S.pv=+m[1];S.out=+m[2]}}}
+function hello(name){setBle(true,'Connected to '+(name||'ESP32'));send(`SP:${S.sp}`);send(`MODE:${S.mode}`);send(`PID:${S.kp},${S.ki},${S.kd}`)}
+$('bt').onclick=async()=>{
+ if(S.ble){
+  if(NATIVE){try{await BleClient.disconnect(link.deviceId)}catch(e){}rx=null;setBle(false,'ESP32 disconnected (local simulation running)')}
+  else{try{link.gatt.disconnect()}catch(e){}}
+  return}
+ try{
+  if(NATIVE){
+   await BleClient.initialize({androidNeverForLocation:true});
+   const dev=await BleClient.requestDevice({services:[NUS]});
+   link={deviceId:dev.deviceId};
+   await BleClient.connect(dev.deviceId,()=>{rx=null;setBle(false,'ESP32 disconnected (local simulation running)')});
+   rx={writeValue:u=>BleClient.write(dev.deviceId,NUS,RXC,new DataView(u.buffer))};
+   await BleClient.startNotifications(dev.deviceId,NUS,TXC,v=>onData(new TextDecoder().decode(v)));
+   hello(dev.name);
+  }else{
+   if(!navigator.bluetooth){$('st').textContent='Web Bluetooth not supported. Use Chrome/Edge or the Android app.';return}
+   link=await navigator.bluetooth.requestDevice({filters:[{services:[NUS]}],optionalServices:[NUS]});
+   link.addEventListener('gattserverdisconnected',()=>{rx=null;setBle(false,'ESP32 disconnected (local simulation running)')});
+   const sv=await(await link.gatt.connect()).getPrimaryService(NUS);
+   rx=await sv.getCharacteristic(RXC);
+   const tx=await sv.getCharacteristic(TXC);
+   await tx.startNotifications();
+   tx.addEventListener('characteristicvaluechanged',ev=>onData(new TextDecoder().decode(ev.target.value)));
+   hello(link.name);
+  }
+ }catch(e){$('st').textContent='Bluetooth: '+(e.message||e)}
+};
+ui();readout();
+</script>
+</body>
+</html>
